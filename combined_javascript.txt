@@ -1,0 +1,1793 @@
+
+ -------------------- channels.js ------------------------ 
+
+/**
+ * colorChannel class
+ *
+ * Represents one panel in the grid
+ * and applies a processing algorithm based on its channel name.
+ */
+class colorChannel {
+    /**
+     * x: panel top left x
+     * y: panel top left y
+     * w: panel width
+     * h: panel height
+     * channel: name of the processing channel
+     * mainapp: mainApp instance or its public state
+     */
+    constructor(x, y, w, h, channel, mainapp) {
+        // Draw area 80% of panel size, centered horizontally and bottom aligned
+        this.w = w * 0.8;
+        this.h = h * 0.8;
+        this.x = x + (w - this.w) / 2;
+        this.y = y + (h - this.h);
+        this.tSize = 15;
+        this.textY = y + this.tSize + this.h * 0.05;
+        this.channel = channel;
+        this.label = "";
+        if (mainapp && mainapp.public) {
+            this.app = mainapp.public;
+        } else {
+            this.app = mainapp;
+        }
+        // cached output image for this panel, to avoid reprocessing when paused
+        this.img = null;
+    }
+
+    /**
+     * Draws the processed image into this panel.
+     * Chooses live or still frames
+     * routes through channelProcess for each channel.
+     */
+    display() {
+        if (!this.app || !this.app.webcam) {
+            return;
+        }
+        // during live mode, clear any cached still images to reprocess
+        if (this.app.live && this.img != null) {
+            this.img = null;
+        }
+        // use captured frame if paused, otherwise use live feed if the channel is webcam (to show the repeated webcam image)
+        let img = null;
+        let mode = "none";
+        if (!this.app.live) {
+            img = this.app.webcam?.getStillFrame();
+        } else if (this.channel === "Webcam") {
+            //live feed for repeat webcam channel
+            const live = this.app.webcam?.getLiveFrame();
+            if (live) {
+                img = live;
+            }
+        }
+        // detect faces in real time in this panel
+        else if (this.channel === "Face Detection") {
+            const live = this.app.webcam?.getLiveFrame();
+            if (live) {
+                img = live;
+            }
+            // resize img for detector
+            img.resize(160, 120);
+            // detect and draw the image with face detection
+            const face = detectFace(img, this.w, this.h, this.mode);
+            image(face, this.x, this.y, this.w, this.h);
+            return;
+        }
+
+        if (!img) {
+            return;
+        }
+
+        if (this.channel === "Face Detection") {
+            mode = this.mode;
+        }
+        if (this.img) {
+            image(this.img, this.x, this.y, this.w, this.h);
+        } else if (img.width > 0 && img.height > 0) {
+            // minimum resolution
+            img.resize(160, 120);
+            // process image based on the channel
+            const processed = channelProcess(img, this.channel, this.app, mode, this);
+            //draw the processed image
+            image(processed, this.x, this.y, this.w, this.h);
+        }
+    }
+
+    // draw the text label of the panel above the image
+    text() {
+        textAlign(CENTER);
+        fill(0);
+        textSize(this.tSize);
+        text(this.label, this.x + this.w / 2, this.textY);
+    }
+}
+/**
+ * detemine which processing task is ran based on channel name
+ *
+ * img: input image
+ * channel: channel name
+ * app: public state conatining UI sliders array
+ * mode: face detection filter
+ *
+ * each threshold channel look up a matching slider by slider.color name
+ * cache processed result in obj.img for reuse.
+ */
+function channelProcess(img, channel, app, mode, obj) {
+    img.loadPixels();
+
+    // RGB splitting
+    if (["Red", "Green", "Blue"].includes(channel)) {
+        obj.img = splitRGB(img, channel);
+        return obj.img;
+    }
+    // greyscale + 20% brightness
+    else if (channel === "Grey") {
+        obj.img = convertToGreyscale(img);
+        return obj.img;
+    }
+    // RGB channel threshold
+    else if (["Red Threshold", "Green Threshold", "Blue Threshold"].includes(channel)) {
+        let slider = app.UI.sliders.find((Slider) => Slider.color === channel);
+        let thresholdVal = 0;
+        if (slider) thresholdVal = slider.getValue();
+        obj.img = thresholdRGB(img, channel, thresholdVal);
+        return obj.img;
+    }
+    // no processing
+    else if (channel === "Webcam") {
+        obj.img = img;
+        return obj.img;
+    }
+    // HSV color space conversions
+    else if (channel === "HSV") {
+        obj.img = convertToHSV(img);
+        return obj.img;
+    }
+    // YCbCr color space conversions
+    else if (channel === "YCbCr") {
+        obj.img = convertToYCbCr(img);
+        return obj.img;
+    }
+    // YCbCr threshold
+    else if (channel === "YCbCr Threshold") {
+        let thresholdVal = 0;
+        if (app.slidersYCbCr) {
+            let slider = app.UI.sliders.find((Slider) => Slider.color === channel);
+            if (slider) {
+                thresholdVal = slider.getValue();
+            }
+        }
+        obj.img = thresholdYCbCr(img, thresholdVal);
+        return obj.img;
+    }
+    // HSV threshold
+    else if (channel === "HSV Threshold") {
+        let thresholdVal = 0;
+        if (app.slidersHSV) {
+            let slider = app.UI.sliders.find((Slider) => Slider.color === channel);
+            if (slider) {
+                thresholdVal = slider.getValue();
+            }
+        }
+        obj.img = thresholdHSV(img, thresholdVal);
+        return obj.img;
+    }
+    // face detection on still image
+    else if (channel === "Face Detection") {
+        obj.img = detectFace(img, app.sectionW * 0.8, app.sectionH * 0.8, mode);
+        return obj.img;
+    }
+    // Color inversion
+    else if (channel === "Invert Color") {
+        obj.img = invertColor(img);
+        return obj.img;
+    }
+    // heat map effect
+    else if (channel === "Heat Map") {
+        obj.img = heatFrame(img);
+        return obj.img;
+    }
+    return img;
+}
+
+/**
+ * Helper to extract RGBA from image.pixels into an array.
+ *
+ * img
+ * i: pixel index in the pixels array
+ * rgba: output array of length 4
+ * returns the same rgba array filled with [r,g,b,a]
+ */
+function getRgba(img, i, rgba) {
+    for (let c = 0; c < 4; c++) {
+        rgba[c] = img.pixels[i + c];
+    }
+    return rgba;
+}
+
+ -------------------- face_detection.js ------------------------ 
+
+// Global face detector
+let faceDetector;
+let detectedFaces = [];
+
+/**
+ * Add a Face Detection panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: channel name
+ * appPublic: public state containing imgProcesses
+ */
+function faceDetectionSetup(x, y, w, h, channel, appPublic) {
+    let face = new colorChannel(x, y, w, h, channel, appPublic);
+    face.label = channel + " Image";
+    // default filter
+    face.mode = "none";
+    appPublic.imgProcesses.push(face);
+}
+
+// called once after setting up the grid to initialize the face detector
+function setupDetection() {
+    faceDetector = new objectdetect.detector(160, 120, 1.2, objectdetect.frontalface);
+}
+
+/**
+ * Detect faces in the given image and apply the selected filter mode.
+ *
+ * img: input frame
+ * w: panel width
+ * h: panel height
+ * mode: "greyscale", "blur", "HSV", "YCbCr", "pixel", apply no filter otherwise
+ * returns an image with faces outlined and filtered
+ */
+function detectFace(img, w, h, mode) {
+    //create output image
+    let output = createGraphics(w, h);
+    // return if facedetector or img is undefined
+    if (!faceDetector || !img) {
+        output.image(img, 0, 0, w, h);
+        return output;
+    }
+
+    //detect faces
+    detectedFaces = faceDetector.detect(img.canvas);
+
+    // draw original img
+    output.image(img, 0, 0, w, h);
+
+    // red rectangle
+    output.noFill();
+    output.stroke(255, 0, 0);
+    output.strokeWeight(2);
+
+    const sx = w / img.width;
+    const sy = h / img.height;
+
+    for (let f of detectedFaces) {
+        // only take faces with high score
+        if (f[4] > 4) {
+            const x = Math.round(f[0]);
+            const y = Math.round(f[1]);
+            const w = Math.round(f[2]);
+            const h = Math.round(f[3]);
+            output.rect(x * sx, y * sy, w * sx, h * sy);
+        }
+    }
+
+    // extract face for filtering
+    for (let f of detectedFaces) {
+        if (f[4] > 4) {
+            const x0 = Math.round(f[0]);
+            const y0 = Math.round(f[1]);
+            const w0 = Math.round(f[2]);
+            const h0 = Math.round(f[3]);
+
+            // crop faceImg from img
+            let faceImg = img.get(x0, y0, w0, h0);
+
+            // apply filters
+            if (mode === "greyscale") {
+                // greyscale filter
+                faceImg = convertToGreyscale(faceImg);
+            } else if (mode === "blur") {
+                // blur filter
+                faceImg = blurFace(faceImg);
+            } else if (mode === "HSV") {
+                // colourspace HSV filter
+                faceImg = convertToHSV(faceImg);
+            } else if (mode === "YCbCr") {
+                // colourspace YCbCr filter
+                faceImg = convertToYCbCr(faceImg);
+            } else if (mode === "pixel") {
+                // pixelate filter
+                faceImg = pixelateFace(faceImg);
+            }
+            // output image
+            output.image(faceImg, x0 * sx, y0 * sy, w0 * sx, h0 * sy);
+        }
+    }
+    // return output image
+    return output;
+}
+
+/**
+ * Pixelate an image by averaging each block of size 5x5.
+ *
+ * img: input face image
+ * return new image with pixelation effect
+ */
+function pixelateFace(img) {
+    const size = 5;
+    const w = img.width;
+    const h = img.height;
+    const output = createImage(w, h);
+
+    img.loadPixels();
+    output.loadPixels();
+
+    // loop through every block of 5x5 pixels
+    const rgba = [0, 0, 0, 0];
+    for (let bx = 0; bx < w; bx += size) {
+        for (let by = 0; by < h; by += size) {
+            const bw = min(size, w - bx);
+            const bh = min(size, h - by);
+
+            let R = 0;
+            let G = 0;
+            let B = 0;
+            let z = 0;
+            for (let x = bx; x < bx + bw; x++) {
+                for (let y = by; y < by + bh; y++) {
+                    let i = (y * w + x) * 4;
+
+                    // extract rgba values
+                    getRgba(img, i, rgba);
+                    R += rgba[0];
+                    G += rgba[1];
+                    B += rgba[2];
+                    z++;
+                }
+            }
+
+            // Compute average color
+            const r = R / z;
+            const g = G / z;
+            const b = B / z;
+            
+            // loop through each pixel in the block, fill with average rgb values
+            for (let x = bx; x < bx + bw; x++) {
+                for (let y = by; y < by + bh; y++) {
+                    let i = (y * w + x) * 4;
+                    output.pixels[i + 0] = r;
+                    output.pixels[i + 1] = g;
+                    output.pixels[i + 2] = b;
+                    output.pixels[i + 3] = rgba[3];
+                }
+            }
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+/**
+ * Apply blur effect to image.
+ *
+ * img: input face image
+ * return new image with blur effect
+ */
+function blurFace(img) {
+    const blur = 15;
+    const radius = floor(blur / 2);
+    const w = img.width;
+    const h = img.height;
+    const output = createImage(w, h);
+
+    img.loadPixels();
+    output.loadPixels();
+
+    const rgba = [0, 0, 0, 0];
+    for (let x = 0; x < w; x++) {
+        for (let y = 0; y < h; y++) {
+            let R = 0;
+            let G = 0;
+            let B = 0;
+            let z = 0;
+
+            for (let dx = -radius; dx <= radius; dx++) {
+                for (let dy = -radius; dy <= radius; dy++) {
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                        let i = (ny * w + nx) * 4;
+
+                        // extract rgba values
+                        getRgba(img, i, rgba);
+                        R += rgba[0];
+                        G += rgba[1];
+                        B += rgba[2];
+                        z++;
+                    }
+                }
+            }
+
+            let i = (y * w + x) * 4;
+            output.pixels[i + 0] = R / z;
+            output.pixels[i + 1] = G / z;
+            output.pixels[i + 2] = B / z;
+            
+            // preserve alpha
+            output.pixels[i + 3] = rgba[3];
+        }
+    }
+
+    output.updatePixels();
+    return output;
+}
+
+ -------------------- greyscale.js ------------------------ 
+
+/**
+ * Add a Greyscale panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel:  channel name
+ * appPublic: public state containing imgProcesses
+ */
+function greyscaleSetup(x, y, w, h, channel, appPublic) {
+    let greyscaleFrame = new colorChannel(x, y, w, h, channel, appPublic);
+    greyscaleFrame.label = "Greyscale and brightness +20%";
+    appPublic.imgProcesses.push(greyscaleFrame);
+}
+/**
+ * Convert an image to greyscale and increase brightness by 20%
+ * 
+ * Multiplies luminace by 1.2 to increase brightness
+ * Constrains to [0,255] to avoid overflow.
+ * 
+ * img: input image
+ * returns a new greyscale with brightness adjusted image
+ */
+function convertToGreyscale(img) {
+    let output = createImage(img.width, img.height);
+    img.loadPixels();
+    output.loadPixels();
+
+    const rgba = [0, 0, 0, 0];
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+            getRgba(img, i, rgba);
+
+            // Luminance calculation
+            let grey = rgba[0] * 0.2126 + rgba[1] * 0.7152 + rgba[2] * 0.0722;
+            // increase brightness by 20%
+            grey *= 1.2;
+            // add constrain so pixel intensity stay in the 0-255 range
+            grey = constrain(grey, 0, 255);
+            for (let z = 0; z < 3; z++) {
+                output.pixels[i + z] = grey;
+            }
+            output.pixels[i + 3] = rgba[3];
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+ -------------------- heat.js ------------------------ 
+
+/**
+ * Add a new “Heat Map” panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: name of the channel
+ * appPublic: public state with imgProcesses array
+ */
+function heatSetup(x, y, w, h, channel, appPublic) {
+    let heat = new colorChannel(x, y, w, h, channel, appPublic);
+    heat.label = "Extensnion: " + channel + " (false color)";
+    appPublic.imgProcesses.push(heat);
+}
+
+/**
+ * Converts an image into a heat map.
+ *
+ * Computes luminance
+ * Maps [0–255] luminance to hue range [240->0].
+ * Writes out RGB pixels.
+ *
+ * img: input image
+ * returns new false color image
+ */
+function heatFrame(img) {
+    const output = createImage(img.width, img.height);
+    img.loadPixels();
+    output.loadPixels();
+
+    const rgba = [0, 0, 0, 0];
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+            getRgba(img, i, rgba);
+
+            let lum = rgba[0] * 0.2126 + rgba[1] * 0.7152 + rgba[2] * 0.0722;
+            // map lum to hue: 240 down to 0
+            const hue = map(lum, 0, 255, 240, 0);
+            const col = color(hue, 100, 100);
+            output.pixels[i] = red(col);
+            output.pixels[i + 1] = green(col);
+            output.pixels[i + 2] = blue(col);
+            output.pixels[i + 3] = 255;
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+ -------------------- HSV.js ------------------------ 
+
+/**
+ * Add an HSV conversion panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: channel name
+ * appPublic: public state containing imgProcesses
+ */
+function HSVSetup(x, y, w, h, channel, appPublic) {
+    let hsvFrame = new colorChannel(x, y, w, h, channel, appPublic);
+    hsvFrame.label = channel + " Image";
+    appPublic.imgProcesses.push(hsvFrame);
+}
+
+/**
+ * Convert an image from RGB to HSV (scaled into 0–255).
+ *
+ * Calls RGBToHSV per pixel.
+ * Scales H to [0,255], S and V to [0,255].
+ * Packs results into R=H, G=S, B=V, preserving alpha.
+ *
+ * img: input image
+ * returns HSV visualization
+ */
+function convertToHSV(img) {
+    let output = createImage(img.width, img.height);
+    img.loadPixels();
+    output.loadPixels();
+
+    // loop through each pixel
+    const rgba = [0, 0, 0, 0];
+    const hsvOutput = { h: 0, s: 0, v: 0 };
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+            // extract rgba values
+            getRgba(img, i, rgba);
+
+            // convert image to hsv image
+            RGBToHSV(rgba[0], rgba[1], rgba[2], hsvOutput);
+
+            let h = Math.round((hsvOutput.h / 360) * 255);
+            let s = Math.round(hsvOutput.s * 255);
+            let v = Math.round(hsvOutput.v * 255);
+
+            output.pixels[i + 0] = h;
+            output.pixels[i + 1] = s;
+            output.pixels[i + 2] = v;
+            //preserve alpha value
+            output.pixels[i + 3] = rgba[3];
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+/**
+ * Convert individual R,G,B values to HSV.
+ * r: red channel
+ * g: green channel
+ * b: blue channel
+ * out: object receiving results
+ */
+function RGBToHSV(r, g, b, out) {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    let max = Math.max(r, g, b);
+    let min = Math.min(r, g, b);
+    let d = max - min;
+    let s;
+    if (max == 0) {
+        s = 0;
+    } else {
+        s = d / max;
+    }
+    let v = max;
+
+    let r_ = 0;
+    let g_ = 0;
+    let b_ = 0;
+    if (d > 0) {
+        r_ = (max - r) / d;
+        g_ = (max - g) / d;
+        b_ = (max - b) / d;
+    }
+
+    let h = 0;
+
+    if (d > 0) {
+        if (max == r && g == min) {
+            h = 5 + b_;
+        } else if (max == r && g != min) {
+            h = 1 - g_;
+        } else if (max == g && b == min) {
+            h = r_ + 1;
+        } else if (max == g && b != min) {
+            h = 3 - b_;
+        } else if (max == r) {
+            h = 3 + g_;
+        } else if (max == b) {
+            h = 5 - r_;
+        }
+
+        h *= 60;
+        if (h < 0) {
+            h += 360;
+        }
+        if (h >= 360) {
+            h -= 260;
+        }
+    } else {
+        h = 0;
+    }
+
+    out.h = h;
+    out.s = s;
+    out.v = v;
+}
+
+/**
+ * Add a HSV threshold panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: channel name
+ * appPublic: public state containing imgProcesses
+ */
+function HSVThresholdSetup(x, y, w, h, channel, appPublic) {
+    let frame = new colorChannel(x, y, w, h, channel, appPublic);
+    frame.label = channel + " Image";
+    appPublic.imgProcesses.push(frame);
+}
+
+/**
+ * Apply a binary threshold on the V channel of HSV.
+ *
+ * Converts the image to HSV via convertToHSV().
+ * Compares V (in B channel) to threshold; copies H,S,V when above, zero otherwise.
+ * 
+ * img: input image
+ * threshold: threshold value
+ * returns new image of thershold HSV
+ */
+function thresholdHSV(img, threshold) {
+    const HSVImg = convertToHSV(img);
+    HSVImg.loadPixels();
+
+    let output = createImage(img.width, img.height);
+    output.loadPixels();
+
+    // loop through each pixel
+    const HSVa = [0, 0, 0, 0];
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+
+            // extract rgba values
+            getRgba(HSVImg, i, HSVa);
+            
+            let val = 0;
+            if (HSVa[2] >= threshold) {
+                for (let z = 0; z < HSVa.length - 1; z++) {
+                    output.pixels[i + z] = HSVa[z];
+                }
+            } else {
+                for (let z = 0; z < HSVa.length - 1; z++) {
+                    output.pixels[i + z] = 0;
+                }
+            }
+            //preserve alpha value
+            output.pixels[i + 3] = HSVa[3];
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+ -------------------- invert_color.js ------------------------ 
+
+/**
+ * Add an Invert Color panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: channel name
+ * appPublic: public state containing imgProcesses
+ */
+function invertColorSetup(x, y, w, h, channel, appPublic) {
+    let invertColorFrame = new colorChannel(x, y, w, h, channel, appPublic);
+    invertColorFrame.label = "Extension: " + channel;
+    appPublic.imgProcesses.push(invertColorFrame);
+}
+
+/**
+ * Invert the RGB channels of an image
+ *
+ * Reads each pixel R, G, B values.
+ * Computes 255 - value for each channel.
+ * preserves the original alpha channel.
+ */
+function invertColor(img) {
+    let output = createImage(img.width, img.height);
+    img.loadPixels();
+    output.loadPixels();
+
+    // loop through each pixel
+    const rgba = [0, 0, 0, 0];
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+            // extract rgba values
+            getRgba(img, i, rgba);
+            //invert rgb values
+            for (let z = 0; z < 3; z++) {
+                output.pixels[i + z] = 255 - rgba[z];
+            }
+            //preserve alpha value
+            output.pixels[i + 3] = rgba[3];
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+ -------------------- main.js ------------------------ 
+
+/**
+ * mainApp class
+ * Initialize UI controls and webcam capture
+ * Layout the grid for image processing panels
+ * Main draw loop
+ * 
+ * create public object, acts as global variables
+ */
+
+class mainApp {
+    constructor() {
+        this.gap = 5;
+        this.sectionW = 250;
+        this.sectionH = this.sectionW * 0.75;
+        this.tRow = 6;
+        this.tCol = 3;
+        this.w = this.sectionW * this.tCol;
+        this.h = this.sectionH * this.tRow;
+
+        this.public = this.createPublic();
+        this.UI = new UI(this);
+    }
+
+    /**
+     * Create a public object shared between all panels and UI
+     * Returns an object containing:
+     * - webcam: null until setWebcam() is called
+     * - imgProcesses: array containing all image processing panels
+     * - layout constants: sectionW, sectionH, gap, w, h
+     */
+    createPublic() {
+        const sliderColors = ["Red", "Green", "Blue"];
+        const RGBThreshold = ["Red Threshold", "Green Threshold", "Blue Threshold"];
+        const slidersHSV = ["HSV"];
+        const slidersYCbCr = ["YCbCr"];
+        const sliderGrps = [sliderColors, slidersHSV, slidersYCbCr];
+        return {
+            webcam: null,
+            UI: this.UI,
+            sliders: this.UI?.sliders,
+            imgProcesses: [],
+            live: true,
+            sliderColors: sliderColors,
+            RGBThreshold: RGBThreshold,
+            slidersHSV: slidersHSV,
+            slidersYCbCr: slidersYCbCr,
+            sliderGrps: sliderGrps,
+            sectionW: this.sectionW,
+            sectionH: this.sectionH,
+            w: this.w,
+            h: this.h,
+            gap: this.gap
+        };
+    }
+
+    // update sliders in public object
+    updatePublic() {
+        this.public.UI = this.UI;
+        if (this.UI && this.UI.sliders) {
+            this.public.sliders = this.UI.sliders;
+        } else {
+            this.public.sliders = null;
+        }
+    }
+
+    /**
+     * called once to initialise canvas, UI, grid, and face detection
+     * build and postition panels into the grid
+     */
+    setup() {
+        createCanvas(this.w + this.gap * this.tCol, this.h + this.gap * this.tRow);
+        pixelDensity(1);
+        let secW = this.sectionW + this.gap;
+        let secH = this.sectionH + this.gap;
+
+        //create and setup UI elements
+        this.UI.UISetup();
+        //setup webcam and the image precessing panels
+        this.gridSetup(secW, secH);
+        this.updatePublic();
+        setupDetection();
+    }
+
+    /** maps number key presses to the Face Detection panel filter modes.
+     * 1 = normal
+     * 2 = greyscale
+     * 3 = blur
+     * 4 = HSV
+     * 5 = YCbCr
+     * 6 = pixelate
+     */
+    keypress(key) {
+        for (let p of this.public.imgProcesses) {
+            if (p.channel === "Face Detection") {
+                try {
+                    if (key === "1") {
+                        p.mode = "none";
+                    } else if (key === "2") {
+                        p.mode = "greyscale";
+                    } else if (key === "3") {
+                        p.mode = "blur";
+                    } else if (key === "4") {
+                        p.mode = "HSV";
+                    } else if (key === "5") {
+                        p.mode = "YCbCr";
+                    } else if (key === "6") {
+                        p.mode = "pixel";
+                    }
+                    p.img = null;
+                } catch (e) {
+                    console.log(e);
+                }
+                break;
+            }
+        }
+    }
+
+    // main draw loop
+    draw() {
+        background(125);
+        noStroke();
+        fill(0, 0, 0, 100);
+
+        // draw vertical and horizontal grid separators
+        for (let i = 1; i <= this.tCol; i++) {
+            let x = i * this.sectionW + (i - 1) * this.gap;
+            rect(x, 0, this.gap, this.h + this.gap * this.tRow);
+        }
+
+        for (let j = 1; j <= this.tRow; j++) {
+            let y = j * this.sectionH + (j - 1) * this.gap;
+            rect(0, y, this.w + this.gap * this.tCol, this.gap);
+        }
+
+        // draw main webcam panel, use live images in live mode, use still image when paused
+        let live = this.public.webcam?.getLiveFrame();
+        let still = this.public.webcam?.getStillFrame();
+        let img = null;
+        if (this.public.live) {
+            img = live;
+        } else {
+            img = still;
+        }
+        if (img) {
+            // draw the image from webcam
+            image(img, this.public.webcam.x, this.public.webcam.y, this.public.webcam.w, this.public.webcam.h);
+            // draw label for main webcam
+            this.public.webcam.text();
+        }
+
+        /**
+         * draw other image processing panels
+         * call display function to draw images
+         * call text function to draw labels
+         * switch color mode when drawing Heat image
+         */
+        for (const process of this.public.imgProcesses) {
+            if (process.channel === "Heat Map") {
+                colorMode(HSB, 360, 100, 100);
+            }
+            process.display();
+            process.text();
+            colorMode(RGB, 255);
+        }
+    }
+    /**
+     * Place each processing panel into its cell in the grid.
+     * - Row 0: main webcam, greyscale + 20% brightness
+     * - Row 1: R; G; B channels
+     * - Row 2: R; G; B thresholds
+     * - Row 3: HSV; YCbCr conversions
+     * - Row 4: Face Detection; HSV thresholds; YCbCr thresholds
+     * - Row 5: Invert Color
+     *
+     * secW/secH are the cell+gap dimensions;
+     * this.sectionW/sectionH are the inner cell sizes.
+     */
+    gridSetup(secW, secH) {
+        // main webcam creation
+        WebcamSetup(secW * 0, secH * 0, this.sectionW, this.sectionH, this);
+        //setup the  repeat webcam
+        subWebcamSetup(secW * 0, secH * 3, this.sectionW, this.sectionH, "Webcam", this.public);
+        //greyscale conversion panel
+        greyscaleSetup(secW * 1, secH * 0, this.sectionW, this.sectionH, "Grey", this.public);
+        //setup the three RGB channels
+        for (let i = 0; i < this.public.sliderColors.length; i++) {
+            rgbSetup(secW * i, secH * 1, this.sectionW, this.sectionH, this.public.sliderColors[i], this.public);
+        }
+        // setup the three RGB threshold channels
+        for (let i = 0; i < this.public.RGBThreshold.length; i++) {
+            rgbThresholdSetup(
+                secW * i,
+                secH * 2,
+                this.sectionW,
+                this.sectionH,
+                this.public.RGBThreshold[i],
+                this.public
+            );
+        }
+        // setup HSV conversion
+        HSVSetup(secW * 1, secH * 3, this.sectionW, this.sectionH, "HSV", this.public);
+        // setup YCbCr conversion
+        YCbCrSetup(secW * 2, secH * 3, this.sectionW, this.sectionH, "YCbCr", this.public);
+        // setup ycbcr threshold channel
+        ycbcrThresholdSetup(secW * 2, secH * 4, this.sectionW, this.sectionH, "YCbCr Threshold", this.public);
+        // setup hsv threshold channel
+        HSVThresholdSetup(secW * 1, secH * 4, this.sectionW, this.sectionH, "HSV Threshold", this.public);
+        // setup face detection panel
+        faceDetectionSetup(secW * 0, secH * 4, this.sectionW, this.sectionH, "Face Detection", this.public);
+        // setup color inversion channel
+        invertColorSetup(secW * 0, secH * 5, this.sectionW, this.sectionH, "Invert Color", this.public);
+        heatSetup(secW * 1, secH * 5, this.sectionW, this.sectionH, "Heat Map", this.public);
+    }
+
+    // set webcam to public object
+    setWebcam(cam) {
+        this.public.webcam = cam;
+    }
+}
+
+ -------------------- RGB.js ------------------------ 
+
+/**
+ * Add an RGB channel panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel:  channel name
+ * appPublic: public state containing imgProcesses
+ */
+function rgbSetup(x, y, w, h, channel, appPublic) {
+    let rgbFrame = new colorChannel(x, y, w, h, channel, appPublic);
+    rgbFrame.label = channel + " channel";
+    appPublic.imgProcesses.push(rgbFrame);
+}
+
+/**
+ * Split an image into a single color channel.
+ * 
+ * zero out all channels, then restores only the specified channel value
+ * preserve original alpha channel
+ * 
+ * img: input image 
+ * channel: channel name
+ * returns new image showing only the specified channel
+ */
+function splitRGB(img, channel) {
+    let output = createImage(img.width, img.height);
+    img.loadPixels();
+    output.loadPixels();
+
+    // loop through each pixel
+    const rgba = [0, 0, 0, 0];
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+            // extract rgba values
+            getRgba(img, i, rgba);
+
+            // set all color to 0
+            for (let z = 0; z < 3; z++) {
+                output.pixels[i + z] = 0;
+            }
+            // Red channel
+            if (channel === "Red") {
+                output.pixels[i + 0] = rgba[0];
+            }
+            // Green channel
+            else if (channel === "Green") {
+                output.pixels[i + 1] = rgba[1];
+            }
+            // Blue channel
+            else if (channel === "Blue") {
+                output.pixels[i + 2] = rgba[2];
+            }
+
+            //preserve alpha value
+            output.pixels[i + 3] = rgba[3];
+        }
+    }
+
+    output.updatePixels();
+    return output;
+}
+
+ -------------------- RGB_Threshold.js ------------------------ 
+
+/**
+ * Add an RGB threshold channel panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel:  channel name
+ * appPublic: public state containing imgProcesses
+ */
+function rgbThresholdSetup(x, y, w, h, channel, appPublic) {
+    let rgbThresFrame = new colorChannel(x, y, w, h, channel, appPublic);
+    rgbThresFrame.label = channel + " Image";
+    appPublic.imgProcesses.push(rgbThresFrame);
+}
+
+/**
+ * Apply a binary threshold to one RGB channel of an image.
+ *
+ * reads the channel value (R, G, or B) at each pixel.
+ * compares it to the provided threshold.
+ * outputs 255 in that channel if above threshold, otherwise 0.
+ * zero out the other two channels
+ * preserve original alpha channel
+ *
+ * img: input image
+ * channel: channel name
+ * threshold: threshold value
+ * returns new image showing only the specified channel
+ */
+function thresholdRGB(img, channel, threshold) {
+    let output = createImage(img.width, img.height);
+    img.loadPixels();
+    output.loadPixels();
+
+    // loop through each pixel
+    const rgba = [0, 0, 0, 0];
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+            // extract rgba values
+            getRgba(img, i, rgba);
+
+            let val = 0;
+            //red threshold
+            if (channel === "Red Threshold") {
+                val = rgba[0];
+            }
+            //green threshold
+            else if (channel === "Green Threshold") {
+                val = rgba[1];
+            }
+            // blue threshold
+            else if (channel === "Blue Threshold") {
+                val = rgba[2];
+            }
+
+            let res = 0;
+            if (val >= threshold) res = 255;
+
+            for (let z = 0; z < 3; z++) {
+                output.pixels[i + z] = 0;
+            }
+            
+            // write the threshold result into the correct channel
+            if (channel === "Red Threshold") {
+                output.pixels[i + 0] = res;
+            } else if (channel === "Green Threshold") {
+                output.pixels[i + 1] = res;
+            } else if (channel === "Blue Threshold") {
+                output.pixels[i + 2] = res;
+            }
+            //preserve alpha value
+            output.pixels[i + 3] = rgba[3];
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+ -------------------- sketch.js ------------------------ 
+
+/**
+   Name: Phan Nang Kien
+   Commentary
+   
+   This project creates an image processing application that uses the webcam to perform various tasks, 
+   including thresholding, color space conversions, face detection, and two extensions false color 
+   heat map and color inversion. The processed images are displayed in a grid, allowing easy 
+   comparison of different techniques.
+   
+   Threshold and Face Detection:
+   The project includes an essential feature of splitting webcam images into RGB channels and applying 
+   thresholding using sliders for each channel, allowing users to adjust the threshold for each one.  
+   Color space HSV and YCbCr conversion were also implemented. These conversions show how the image 
+   changes when represented in alternative color models. I also implemented face detection 
+   using objectdetect.frontalface. Users can apply various filters like greyscale, blur, HSV, YCbCr, 
+   and pixelation onto the detected face area. These filters are triggered by keyboard inputs 1-6.
+   
+   Extension:
+   I implemented two extensions to enhance the project: false color heat map and color inversion.
+   The heat map extension visualizes an image by mapping pixel brightness to a color scale, from blue 
+   for low values to red for high values. This extension make the images looks like a thermal image,
+   which is a unique image visualization.
+    
+   Another extension, the color inversion extension inverts the RGB channels of the image by subtracting 
+   the pixel values from 255. This extension show how a simple color flip can drastically change how an 
+   image feels.
+   
+   Challenges and Solutions:
+   One of the challenges I faced in this project was optimizing performance, especially after the 
+   user captures an image. Initially, I made the program run all the image processing tasks
+   every frame, which causes the screen to lag or freeze, particularly when running multiple 
+   tasks. To improve performance, I implemented a caching mechanism. After capturing an image,
+   the image processing function now caches the processed result for each channel. Instead
+   of reprocessing the image every frame, the app displays the cached images. The image
+   is only reprocessed when the user adjusts a threshold slider or selects a different face
+   filter, which improves performance. This allows smooth interaction with the controls
+   without causing any lag or freeze.
+   
+   Another challenge was maintaining a modular code structure. I used object oriented principles to 
+   separate different image processing tasks into separate files, ensuring the code remained 
+   clean and manageable.
+   
+   Conclusion:
+   This project meets all the requirements of the assignment. Core tasks such as thresholding, color space 
+   conversions, and face detection are successfully implemented. The extensions, false color heat map and
+   color inversion, offer creative visual effects that enhance the project. 
+ */
+
+let app;
+
+function setup() {
+    app = new mainApp();
+    app.setup();
+    frameRate(30);
+}
+
+function draw() {
+    app.draw();
+}
+
+function keyPressed() {
+    if (app.keypress) {
+        app.keypress(key);
+    }
+}
+
+ -------------------- slider.js ------------------------ 
+
+/**
+ * thresholdSlider class
+ *
+ * Renders a slider (0–255) and a label showing its current value.
+ * run events on input (live update) and on change (log to console).
+ */
+class thresholdSlider {
+    constructor(channel, sliders, channels) {
+        this.channel = channel;
+        this.channels = channels;
+        this.slider = createSlider(0, 255, 128, 1);
+        this.slider.style("width", "200px");
+        this.color = this.channel + " Threshold";
+
+        //label showing "(channel) Threshold: (slider value)"
+        this.label = createDiv(this.color + ": " + this.slider.value());
+
+        // bind events
+        this.slider.changed(() => this.onSliderChange());
+        this.slider.input(() => this.onSliderInput());
+
+        // add this slider to the sliders array
+        if (sliders) {
+            sliders.push(this);
+        }
+    }
+
+    // returns current slider value
+    getValue() {
+        return this.slider.value();
+    }
+
+    //write to console the value of the slider
+    onSliderChange() {
+        console.log(this.channel + " Threshold: " + this.slider.value());
+    }
+
+    //update label as slider is being moved, remove cached image of the associated channel 
+    onSliderInput() {
+        this.label.html(this.channel + " Threshold: " + this.slider.value());
+        this.channels.forEach((channel) => {
+            if (channel.channel === this.color) {
+                channel.img = null;
+                return;
+            }
+        });
+    }
+}
+
+ -------------------- UI.js ------------------------ 
+
+/**
+ * UI class
+ *
+ * manages all on screen controls
+ * include a draggable panel with buttons and sliders
+ * a seperate draggable panel with instructions
+ * 2 buttons for capturing image and live feed toggle, and reconnect camera functionality
+ *
+ * expect app to be an insctance of mainApp
+ */
+class UI {
+    constructor(app) {
+        this.app = app;
+        this.W = this.app.sectionW + this.app.gap;
+        this.H = this.app.sectionH + this.app.gap;
+
+        //create the draggable control panel container
+        this.controlPanel = createDiv();
+        this.controlPanel
+            .style("top", "10px")
+            .style("left", "10px")
+            .style("background-color", "#444")
+            .style("border", "1px solid #000000")
+            .style("border-radius", "8px")
+            .style("padding", "10px 40px")
+            .style("width", this.W + "px")
+            .style("cursor", "move")
+            .style("text-align", "center")
+            .position(this.W * 3, this.H * 0)
+            .style("position", "fixed");
+
+        // header for dragging the panel
+        this.controlHeader = createDiv("Draggable UI Panel");
+        this.controlHeader
+            .parent(this.controlPanel)
+            .style("font-weight", "bold")
+            .style("cursor", "move")
+            .style("margin-bottom", "6px")
+            .style("text-align", "center");
+
+        // draggable instructions panel container
+        this.instructionPanel = createDiv();
+        this.instructionPanel
+            .style("top", "10px")
+            .style("left", "10px")
+            .style("background-color", "#444")
+            .style("border", "1px solid #000000")
+            .style("border-radius", "8px")
+            .style("padding", "10px 40px")
+            .style("cursor", "move")
+            .style("width", this.W + "px")
+            .position(this.W * 4 + 50, this.H * 0)
+            .style("position", "fixed");
+
+        // header for dragging the panel
+        this.instructionHeader = createDiv("Draggable Intructions Panel");
+        this.instructionHeader
+            .parent(this.instructionPanel)
+            .style("font-weight", "bold")
+            .style("cursor", "move")
+            .style("margin-bottom", "6px")
+            .style("text-align", "center");
+
+        this.captureBtn = null;
+        this.reconnectBtn = null;
+        this.sliders = [];
+        this.sliderLabels = [];
+        // group of sliders used to create sliders
+        this.sliderGrps = this.app.public.sliderGrps;
+    }
+    /**
+     * Set up all UI components:
+     *  - buttons
+     *  - sliders
+     *  - instructions
+     *  - make UI draggable
+     */
+    UISetup() {
+        this.btnsSetup();
+        this.slidersSetup();
+        this.instructionSetup();
+        this.draggableUI();
+    }
+    /**
+     * Makes controlPanel and instructionPanel draggable.
+     * add mousemove and mouseup to window.
+     */
+    draggableUI() {
+        const ctrlPanel = this.controlPanel.elt;
+        const header = this.controlHeader.elt;
+        const instruction = this.instructionPanel.elt;
+        const iheader = this.instructionHeader.elt;
+
+        let oX = 0;
+        let oY = 0;
+        let dragging = null;
+        function startDrag(e) {
+            // determine which panel we are dragging
+            if (e.target === ctrlPanel || e.target === header) {
+                dragging = ctrlPanel;
+            } else if (e.target === instruction || e.target === iheader) {
+                dragging = instruction;
+            } else {
+                return;
+            }
+            e.preventDefault();
+            oX = e.pageX - dragging.offsetLeft;
+            oY = e.pageY - dragging.offsetTop;
+        }
+
+        ctrlPanel.onmousedown = startDrag;
+        header.onmousedown = startDrag;
+        instruction.onmousedown = startDrag;
+        iheader.onmousedown = startDrag;
+
+        window.onmousemove = (e) => {
+            if (!dragging) return;
+
+            // new position for the dragged panel
+            dragging.style.left = e.pageX - oX + "px";
+            dragging.style.top = e.pageY - oY + "px";
+        };
+
+        window.onmouseup = () => {
+            // reset dragging object
+            dragging = null;
+        };
+    }
+
+    /**
+     * create the Capture and Reconnect Camera buttons.
+     * Capture toggles live/still mode
+     * Reconnect recreate the webcam object
+     */
+    btnsSetup() {
+        // button container
+        const btnRow = createDiv();
+        btnRow.parent(this.controlPanel);
+        btnRow
+            .style("margin-bottom", "12px")
+            .style("display", "flex")
+            .style("justify-content", "space-evenly")
+            .style("align-items", "center")
+            .style("margin-bottom", "8px");
+
+        //capture button
+        this.captureBtn = createButton("Capture");
+        this.captureBtn
+            .parent(btnRow)
+            .size(70, 70)
+            .style("background-color", "rgb(30, 224, 56)")
+            .style("border-radius", "20%")
+            .mousePressed(() => this.toggleLive());
+
+        //reconnect button
+        this.reconnectBtn = createButton("Reconnect Camera");
+        this.reconnectBtn
+            .parent(btnRow)
+            .size(70, 70)
+            .style("background-color", "rgb(30, 224, 56)")
+            .style("border-radius", "20%")
+            .mousePressed(() => this.reconnectCam());
+
+        // add the buttons to the container for styling purposes
+        this.captureBtn.parent(btnRow);
+        this.reconnectBtn.parent(btnRow);
+    }
+
+    /**
+     * create threshold sliders for each group defined in sliderGrps
+     * sliderGrps = [ ["Red","Green","Blue"], ["HSV"], ["YCbCr"] ]
+     * each slider is an instance of thresholdSlider(label, this.sliders).
+     * after each group, insert a dividing line.
+     */
+    slidersSetup() {
+        for (let c = 0; c < this.sliderGrps.length; c++) {
+            for (let b = 0; b < this.sliderGrps[c].length; b++) {
+                let label = this.sliderGrps[c][b];
+                // create slider
+                let slider = new thresholdSlider(label, this.sliders, this.app.public.imgProcesses);
+                // create container for label and slider, label above their respective slider
+                const row = createDiv().parent(this.controlPanel).style("white-space", "nowrap").style("margin", "0");
+                slider.label.parent(row);
+                slider.label.style("margin", "0");
+                slider.slider.parent(row);
+                slider.slider.style("margin-bottom", "0");
+            }
+            //seperate each group of sliders
+            createDiv()
+                .parent(this.controlPanel)
+                .style("white-space", "nowrap")
+                .style("padding", "1px")
+                .style("margin", "15px 0")
+                .style("background-color", "#000000");
+        }
+    }
+    
+    /**
+     * add instructions content to instructions panel.
+     * key mappings for the Face Detection filters.
+     */
+    instructionSetup() {
+        createDiv("How to use this app:")
+            .parent(this.instructionPanel)
+            .style("font-weight", "bold")
+            .style("margin-bottom", "8px");
+
+        const lines = [
+            "Press Capture to freeze/unfreeze the live webcam.",
+            "Use each slider to adjust its channel's threshold in real time.",
+            "In the Face Detection panel, press keys to adjust face filter:",
+            "  1 – Normal",
+            "  2 – Greyscale",
+            "  3 – Blur",
+            "  4 – HSV colorspace",
+            "  5 – YCbCr colorspace",
+            "  6 – Pixelate"
+        ];
+
+        for (let l of lines) {
+            createDiv(l)
+                .parent(this.instructionPanel)
+                .style("margin", "0")
+                .style("font-size", "14px")
+                .style("line-height", "1.4");
+        }
+    }
+
+    /**
+     * Toggle between live feed video and still frame for processing
+     * toggles this.app.public.live flag
+     * capture a still frame from the webcam panel when live flag is toggled to false
+     * updates button label and color when toggled
+     */
+    toggleLive() {
+        //toggle live flag
+        this.app.public.live = !this.app.public.live;
+        //update public information
+        this.app.updatePublic();
+        if (!this.app.public.live) {
+            // Capture the current webcam image if the live feed is off
+            this.app.public.webcam?.captureFrame();
+            this.captureBtn.html("Live Feed");
+            this.captureBtn.style("background-color", "rgb(219, 24, 24)");
+        } else {
+            this.captureBtn.html("Capture");
+            this.captureBtn.style("background-color", "rgb(30, 224, 56)");
+        }
+    }
+    
+    /**
+     * Reinitialize the webcam feed
+     * If not live, switch back to live
+     * remove existing webcam element
+     * call WebcamSetup() to recreate main webcam
+     * update public state on success
+     */
+    async reconnectCam() {
+        //toggle back to live
+        if (!this.app.public.live) {
+            this.toggleLive();
+        }
+
+        //begin reconnection
+        console.log("Reconnecting webcam...");
+        // remove current webcam element
+        if (this.app.public.webcam?.cap) {
+            this.app.public.webcam.cap.remove();
+        }
+        this.app.public.webcam = null;
+
+        // recreate main webcam
+        await WebcamSetup(this.app.sectionW * 0, this.app.sectionH * 0, this.app.sectionW, this.app.sectionH, this.app);
+
+        //success log and update public 
+        if (this.app.public.webcam) {
+            this.app.public.webcam.capFrame = null;
+            console.log("Webcam reconnected.");
+            this.app.updatePublic();
+        }
+    }
+}
+
+ -------------------- webcam.js ------------------------ 
+
+/**
+ * Initialize the main webcam asynchronously and add it to the app.
+ * x: x-position of the webcam panel
+ * y: y-position of the webcam panel
+ * w: width of the webcam panel
+ * h: height of the webcam panel
+ * app: the mainApp instance
+ */
+async function WebcamSetup(x, y, w, h, app) {
+    // Create a new Webcam; call ready(cam) when loaded
+    const cam = await new Promise((ready) => {
+        new Webcam(x, y, w, h, {
+            ifReady: ready
+        });
+    });
+    app.setWebcam(cam);
+    app.updatePublic();
+}
+
+/**
+ * Add a “repeat” webcam panel
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: channel name
+ * public: the shared public state (holds imgProcesses array)
+ */
+function subWebcamSetup(x, y, w, h, channel, public) {
+    let sub = new colorChannel(x, y, w, h, channel, public);
+    sub.label = "Webcam Image (Repeat)";
+    public.imgProcesses.push(sub);
+}
+
+/**
+ * Webcam class
+ *
+ * position itself at the bottom of its panel
+ * Provides live or still frames on demand
+ *
+ * x: top left x of the panel
+ * y: top left y of the panel
+ * w: total panel width
+ * h: total panel height
+ */
+class Webcam {
+    constructor(x, y, w, h, { ifReady }) {
+        // draw area at 80% of panel size, centered horizontally and bottom aligned
+        this.w = w * 0.8;
+        this.h = h * 0.8;
+        this.x = x + (w - this.w) / 2;
+        this.y = y + (h - this.h);
+        this.tSize = 15;
+        this.textY = y + this.tSize + this.h * 0.05;
+        this.label = "Webcam Image";
+
+        this.cap = null;
+        // captured still frame
+        this.capFrame = null;
+        this.ready = false;
+        this.error = null;
+
+        //create video capture
+        this.cap = createCapture({ video: true, audio: false });
+        this.cap.size(this.w, this.h);
+        this.cap.hide();
+
+        // when video element has loaded data, mark as ready
+        this.cap.elt.onloadeddata = () => {
+            this.ready = true;
+            ifReady(this);
+        };
+    }
+
+    // draw panel label at the top center
+    text() {
+        textAlign(CENTER);
+        fill(0);
+        textSize(this.tSize);
+        text(this.label, this.x + this.w / 2, this.textY);
+    }
+
+    // capture the current live frame and store it as this.capFrame
+    captureFrame() {
+        if (this.ready && this.cap) {
+            this.capFrame = this.cap.get();
+        }
+    }
+
+    // return live image captured by webcam
+    getLiveFrame() {
+        if (this.ready) {
+            // return the live webcam feed when ready
+            return this.cap.get();
+        } else {
+            // Webcam is not ready yet
+            return null;
+        }
+    }
+
+    getStillFrame() {
+        // Return the last captured still image
+        return this.capFrame;
+    }
+}
+
+ -------------------- YCbCr.js ------------------------ 
+
+/**
+ * Add a YCbCr conversion panel to the grid.
+ *
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: channel name
+ * appPublic: public state containing imgProcesses
+ */
+function YCbCrSetup(x, y, w, h, channel, appPublic) {
+    let YCbCrFrame = new colorChannel(x, y, w, h, channel, appPublic);
+    YCbCrFrame.label = channel + " Image";
+    appPublic.imgProcesses.push(YCbCrFrame);
+}
+
+/**
+ * Convert an image from RGB to YCbCr color space
+ *
+ * Reads each pixel RGB.
+ * Applies BT.601 to calculate Y, Cb, Cr.
+ * Cb/Cr +128 and clamps each channel to [0–255].
+ * preserves original alpha.
+ *
+ * img: input image
+ * returns HSV visualization
+ */
+function convertToYCbCr(img) {
+    let output = createImage(img.width, img.height);
+    img.loadPixels();
+    output.loadPixels();
+
+    // loop through each pixel
+    const rgba = [0, 0, 0, 0];
+    const ycbcrOutput = { y: 0, cb: 0, cr: 0 };
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+            // extract rgba values
+            getRgba(img, i, rgba);
+
+            // convert image to YCbCr image
+            RGBToYCbCr(rgba[0], rgba[1], rgba[2], ycbcrOutput);
+
+            let Y = Math.max(0, Math.min(255, Math.round(ycbcrOutput.y)));
+            let cb = Math.max(0, Math.min(255, Math.round(ycbcrOutput.cb + 128)));
+            let cr = Math.max(0, Math.min(255, Math.round(ycbcrOutput.cr + 128)));
+
+            output.pixels[i + 0] = Y;
+            output.pixels[i + 1] = cb;
+            output.pixels[i + 2] = cr;
+            //preserve alpha value
+            output.pixels[i + 3] = rgba[3];
+        }
+    }
+    output.updatePixels();
+    return output;
+}
+
+/**
+ * Convert RGB channels to Y, Cb, and Cr.
+ *
+ * r: red channel
+ * g: green channel
+ * b: blue channel
+ * out: object receiving results
+ */
+function RGBToYCbCr(r, g, b, out) {
+    //ITU.BT-601 YCbCr
+    let y = 0.299 * r + 0.587 * g + 0.114 * b;
+    let cb = -0.169 * r - 0.331 * g + 0.5 * b;
+    let cr = 0.5 * r - 0.419 * g - 0.081 * b;
+
+    out.y = y;
+    out.cb = cb;
+    out.cr = cr;
+}
+
+/**
+ * Add a YCbCr threshold panel to the grid.
+ * 
+ * x: panel x position
+ * y: panel y position
+ * w: panel width
+ * h: panel height
+ * channel: channel name
+ * appPublic: public state containing imgProcesses
+ */
+function ycbcrThresholdSetup(x, y, w, h, channel, appPublic) {
+    let frame = new colorChannel(x, y, w, h, channel, appPublic);
+    frame.label = channel + " Image";
+    appPublic.imgProcesses.push(frame);
+}
+
+ /**
+ *  Apply a binary threshold on the Y(luminence) channel of a YCbCr image.
+ *
+ * Converts the image to YCbCr with convertToYCbCr()
+ * Compares Y (in R channel) to threshold; copies Y, Cb, Cr when above, zero otherwise.
+ * preserves alpha.
+ * 
+ * img: input image
+ * threshold: threshold value
+ * returns new image of thershold HSV
+ */
+function thresholdYCbCr(img, threshold) {
+    const YCbCrImg = convertToYCbCr(img);
+    YCbCrImg.loadPixels();
+
+    let output = createImage(img.width, img.height);
+    output.loadPixels();
+
+    // loop through each pixel
+    const YCbCra = [0, 0, 0, 0];
+    for (let x = 0; x < img.width; x++) {
+        for (let y = 0; y < img.height; y++) {
+            let i = (y * img.width + x) * 4;
+
+            // extract rgba values
+            getRgba(YCbCrImg, i, YCbCra);
+
+            let val = 0;
+            if (YCbCra[0] >= threshold) {
+                for (let z = 0; z < YCbCra.length - 1; z++) {
+                    output.pixels[i + z] = YCbCra[z];
+                }
+            } else {
+                for (let z = 0; z < YCbCra.length - 1; z++) {
+                    output.pixels[i + z] = 0;
+                }
+            }
+            //preserve alpha value
+            output.pixels[i + 3] = YCbCra[3];
+        }
+    }
+    output.updatePixels();
+    return output;
+}
